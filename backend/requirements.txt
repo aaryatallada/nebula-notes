@@ -9,3 +9,4 @@ pandas==2.2.3
 scikit-learn==1.5.2
 sentence-transformers==3.0.1
 rank-bm25==0.2.2
+psycopg2-binary
