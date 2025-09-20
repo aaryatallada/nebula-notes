@@ -8,10 +8,13 @@ from embeddings import from_bytes
 
 # Compute 2D coordinates for the Idea Map with small-dataset safeguards.
 
-def tsne_2d(db: Session, perplexity: float = 10.0, random_state: int = 42) -> List[Tuple[int, float, float, str]]:
+def tsne_2d(db: Session, owner: str | None = None, perplexity: float = 10.0, random_state: int = 42) -> List[Tuple[int, float, float, str]]:
     """Return list of (id, x, y, title) for notes with embeddings.
     Robust to tiny datasets (n < perplexity)."""
-    notes = db.query(Note).all()
+    q = db.query(Note)
+    if owner is not None:
+        q = q.filter(Note.owner_id == owner)
+    notes = q.all()    
     vecs, ids, titles = [], [], []
     for n in notes:
         if n.embedding: #only use notes with embeddings

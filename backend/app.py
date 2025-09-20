@@ -2,7 +2,7 @@
 
 from typing import List, Optional 
 
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import FastAPI, Depends, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
@@ -23,6 +23,11 @@ except Exception:
     _HAS_HYBRID = False
 
 
+
+def get_owner_id(x_user: str | None = Header(default=None, alias="X-User")) -> str:
+    if not x_user:
+        raise HTTPException(400, "Missing X-User header")
+    return x_user
 
 
 def _normalize_scores(pairs):
@@ -52,12 +57,11 @@ app.add_middleware(
 )
 
 
-def _ensure_all_embeddings(db: Session) -> int:
-    """
-    Ensure every note has an up-to-date embedding.
-    Returns the number of notes processed.
-    """
-    notes = db.query(Note).all()
+def _ensure_all_embeddings(db: Session, owner: str | None = None) -> int:
+    q = db.query(Note)
+    if owner is not None:
+        q = q.filter(Note.owner_id == owner)
+    notes = q.all()
     for n in notes:
 
         ensure_embedding(db, n)
@@ -71,15 +75,16 @@ def health():
 
 
 @app.get("/api/notes", response_model=List[NoteOut])
-def list_notes(db: Session = Depends(get_db)):
-    """List notes newest-first."""
-    return db.query(Note).order_by(Note.id.desc()).all()
+def list_notes(owner: str = Depends(get_owner_id), db: Session = Depends(get_db)):
+    return (db.query(Note)
+              .filter(Note.owner_id == owner)
+              .order_by(Note.id.desc())
+              .all())
 
 
 @app.post("/api/notes", response_model=NoteOut)
-def create_note(payload: NoteCreate, db: Session = Depends(get_db)):
-    """Create a note and immediately embed it."""
-    n = Note(title=payload.title, content=payload.content)
+def create_note(payload: NoteCreate, owner: str = Depends(get_owner_id), db: Session = Depends(get_db)):
+    n = Note(owner_id=owner, title=payload.title, content=payload.content)
     db.add(n)
     db.commit()
     db.refresh(n)
@@ -140,19 +145,15 @@ def rebuild_embeddings(db: Session = Depends(get_db)):
 
 
 @app.get("/api/search", response_model=List[SearchResult])
-def search(
-    q: str,
-    k: int = 10,
-    mode: str = Query("hybrid", description="hybrid|semantic"),
-    alpha: Optional[float] = Query(None, ge=0.0, le=1.0),
-    db: Session = Depends(get_db),
-):
-    _ensure_all_embeddings(db)
+def search(q: str, k: int = 10, mode: str = Query("hybrid", description="hybrid|semantic"),
+           alpha: Optional[float] = Query(None, ge=0.0, le=1.0),
+           owner: str = Depends(get_owner_id), db: Session = Depends(get_db)):
+    _ensure_all_embeddings(db, owner)
 
     if mode == "semantic" or not _HAS_HYBRID:
-        ranked = similarity_search(db, q, k=k)
+        ranked = similarity_search(db, q, k=k, owner = owner)
     else:
-        ranked = hybrid_search(db, q, k=k, alpha=alpha) 
+        ranked = hybrid_search(db, q, k=k, alpha=alpha, owner = owner) 
         if rerank is not None:
             ranked = rerank(q, ranked)  
 
@@ -162,10 +163,7 @@ def search(
 
 
 @app.get("/api/map", response_model=List[MapPoint])
-def idea_map(db: Session = Depends(get_db)):
-    """
-    Return 2D coordinates for each embedded note using t-SNE (for the UI scatter plot).
-    """
-    _ensure_all_embeddings(db)
-    coords = tsne_2d(db)
+def idea_map(owner: str = Depends(get_owner_id), db: Session = Depends(get_db)):
+    _ensure_all_embeddings(db, owner)
+    coords = tsne_2d(db, owner=owner)
     return [{"id": i, "x": x, "y": y, "title": t} for (i, x, y, t) in coords]

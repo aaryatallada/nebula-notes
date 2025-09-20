@@ -13,6 +13,7 @@ class NoteUpdate(BaseModel):
 
 class NoteOut(BaseModel):
     id: int
+    owner_id: str
     title: str
     content: str
     class Config:

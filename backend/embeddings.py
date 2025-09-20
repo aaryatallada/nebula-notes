@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from rank_bm25 import BM25Okapi
+import re
 
 from models import Note, Embedding
 
@@ -69,9 +70,20 @@ def missing_embeddings(db: Session) -> List[Note]:
     notes = db.query(Note).all()
     return [n for n in notes if not n.embedding]
 
-def similarity_search(db: Session, query: str, k: int = 10) -> List[Tuple[Note, float]]:
-    """Return top-k notes by cosine similarity between query and note embeddings."""
-    notes = db.query(Note).all()
+def similarity_search(
+    db: Session,
+    query: str,
+    k: int = 10,
+    owner: Optional[str] = None,
+) -> List[Tuple[Note, float]]:
+    """
+    Pure semantic search scoped to an owner (if provided).
+    """
+    q = db.query(Note)
+    if owner is not None:
+        q = q.filter(Note.owner_id == owner)
+    notes = q.all()
+
     meta: List[Note] = []
     vecs: List[np.ndarray] = []
     for n in notes:
@@ -80,28 +92,31 @@ def similarity_search(db: Session, query: str, k: int = 10) -> List[Tuple[Note, 
             vecs.append(from_bytes(n.embedding.vector, n.embedding.dim))
     if not vecs:
         return []
-    M = np.vstack(vecs)  # (N, d)
+
+    V = np.vstack(vecs)
     q_vec = embed_texts([query])[0].reshape(1, -1)
-    sims = cosine_similarity(q_vec, M)[0]  # (N,)
+    sims = cosine_similarity(q_vec, V)[0]
     ranked = sorted(zip(meta, sims), key=lambda t: t[1], reverse=True)
     return ranked[:k]
 
 def _tok(s: str) -> List[str]:
     return [t for t in re.split(r"[^A-Za-z0-9]+", (s or "").lower()) if t]
-
-def hybrid_search(db: Session, query: str, k: int = 10, alpha: Optional[float] = None) -> List[Tuple[Note, float]]:
+def hybrid_search(
+    db: Session,
+    query: str,
+    k: int = 10,
+    alpha: Optional[float] = None,
+    owner: Optional[str] = None,
+) -> List[Tuple[Note, float]]:
     """
-    Hybrid retrieval with pragmatic tweaks + pseudo-relevance feedback (PRF):
-
-      final = α * semantic + (1-α) * bm25_norm + β * length_prior - γ * no_overlap_penalty
-
-    - Dynamic α: short queries (<= 2 tokens) rely more on BM25.
-    - Title boost: title tokens duplicated in corpus.
-    - Length prior: down-weight very short notes.
-    - No-overlap penalty: for very short queries, docs with zero lexical overlap drop.
-    - PRF: if there is zero lexical overlap, expand query tokens using top semantic docs.
+    Hybrid retrieval (semantic + BM25 + priors + PRF), scoped to an owner (if provided).
     """
-    notes = db.query(Note).all()
+    # 1) Fetch only this owner's notes
+    q_notes = db.query(Note)
+    if owner is not None:
+        q_notes = q_notes.filter(Note.owner_id == owner)
+    notes = q_notes.all()
+
     meta: List[Note] = []
     vecs: List[np.ndarray] = []
     titles: List[str] = []
@@ -117,31 +132,32 @@ def hybrid_search(db: Session, query: str, k: int = 10, alpha: Optional[float] =
     if not vecs:
         return []
 
-    V = np.vstack(vecs)  # (N, d)
+    V = np.vstack(vecs)
 
-    # Semantic part
+    # 2) Semantic
     q_vec = embed_texts([query])[0].reshape(1, -1)
-    sem = cosine_similarity(q_vec, V)[0]  
+    sem = cosine_similarity(q_vec, V)[0]
 
+    # 3) BM25 corpus with title boost
     corpus_tokens: List[List[str]] = []
     doc_lengths: List[int] = []
     for t, c in zip(titles, contents):
         t_tok = _tok(t)
         c_tok = _tok(c)
-        tokens = t_tok + t_tok + c_tok  # boost
-        corpus_tokens.append(tokens)
-        doc_lengths.append(len(tokens))
+        toks = t_tok + t_tok + c_tok
+        corpus_tokens.append(toks)
+        doc_lengths.append(len(toks))
 
     bm25 = BM25Okapi(corpus_tokens)
     q_tokens = _tok(query)
 
+    # 4) PRF for zero-overlap short queries
     STOP = {
         "the","a","an","of","and","or","to","for","in","on","at","is","it",
         "this","that","with","by","as","be","are","was","were","from","up",
         "new","note","notes"
     }
     def prf_terms(top_m: int = 3, topk_terms: int = 6) -> List[str]:
-        # pick tokens from top-m semantically similar docs
         idx = np.argsort(-sem)[:top_m]
         counts = {}
         for i in idx:
@@ -149,23 +165,21 @@ def hybrid_search(db: Session, query: str, k: int = 10, alpha: Optional[float] =
                 if len(tok) < 3 or tok in STOP:
                     continue
                 counts[tok] = counts.get(tok, 0) + 1
-        # top-k frequent terms
         return [t for t, _ in sorted(counts.items(), key=lambda x: (-x[1], x[0]))[:topk_terms]]
 
     query_tokens_for_bm25 = list(q_tokens)
-
     if len(q_tokens) <= 2:
         qset = set(q_tokens)
         has_overlap_any = any(bool(qset.intersection(doc)) for doc in corpus_tokens)
         if not has_overlap_any:
             exp = prf_terms(top_m=3, topk_terms=6)
-            query_tokens_for_bm25 += exp + exp  # duplicate to give them weight
+            query_tokens_for_bm25 += exp + exp
 
-    # BM25 scores (normalized to [0,1])
     bm25_scores = bm25.get_scores(query_tokens_for_bm25).astype(float)
     bmax = float(bm25_scores.max()) if bm25_scores.size else 0.0
     bm25_norm = (bm25_scores / bmax) if bmax > 0 else np.zeros_like(bm25_scores)
 
+    # 5) Priors and penalties
     L = np.array(doc_lengths, dtype=float)
     length_prior = np.clip((L - 8) / 60.0, 0.0, 1.0)
     beta = 0.15
@@ -174,12 +188,10 @@ def hybrid_search(db: Session, query: str, k: int = 10, alpha: Optional[float] =
     overlap = np.array([1.0 if qset.intersection(doc) else 0.0 for doc in corpus_tokens], dtype=float)
     gamma = 0.18 if len(q_tokens) <= 2 else 0.0
 
-    # Dynamic alpha
     if alpha is None:
         alpha = 0.35 if len(q_tokens) <= 2 else 0.65
 
     combined = alpha * sem + (1.0 - alpha) * bm25_norm + beta * length_prior - gamma * (1.0 - overlap)
-
     ranked = sorted(zip(meta, combined), key=lambda t: t[1], reverse=True)
     return ranked[:k]
 
