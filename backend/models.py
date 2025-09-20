@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, LargeBinary
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.sqlite import BLOB
@@ -23,7 +23,7 @@ class Embedding(Base):
 
     note_id = Column(Integer, ForeignKey("notes.id"), primary_key=True)
     # store raw bytes for the float32 vector
-    vector = Column(BLOB, nullable=False)
+    vector = Column(LargeBinary, nullable=False)
     dim = Column(Integer, nullable=False)
 
     note = relationship("Note", back_populates="embedding")
