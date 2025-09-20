@@ -12,8 +12,7 @@ from schemas import NoteCreate, NoteUpdate, NoteOut, SearchResult, MapPoint
 from utils import tsne_2d
 
 
-from embeddings import ensure_embedding, similarity_search
-
+from .embeddings import ensure_embedding, rebuild_embeddings, similarity_search
 try:
     from embeddings import hybrid_search, rerank 
     _HAS_HYBRID = True
@@ -82,16 +81,23 @@ def list_notes(owner: str = Depends(get_owner_id), db: Session = Depends(get_db)
               .all())
 
 
-@app.post("/api/notes", response_model=NoteOut)
-def create_note(payload: NoteCreate, owner: str = Depends(get_owner_id), db: Session = Depends(get_db)):
-    n = Note(owner_id=owner, title=payload.title, content=payload.content)
-    db.add(n)
-    db.commit()
-    db.refresh(n)
-    ensure_embedding(db, n)  # create embedding on write
-    db.commit()
-    db.refresh(n)
-    return n
+@app.post("/api/notes")
+def create_note(request: Request, payload: dict):
+    owner = get_owner_id(request)  # your helper that reads X-User
+    title = (payload.get("title") or "").strip()
+    content = (payload.get("content") or "").strip()
+
+    with SessionLocal() as db:
+        note = Note(owner_id=owner, title=title, content=content)
+        db.add(note)
+        db.commit()
+        db.refresh(note)
+
+        # NEW: upsert the embedding for this note
+        ensure_embedding(db, note)
+        db.commit()
+
+        return note
 
 
 @app.get("/api/notes/{note_id}", response_model=NoteOut)
@@ -116,10 +122,18 @@ def update_note(note_id: int, payload: NoteUpdate, db: Session = Depends(get_db)
     db.add(n)
     db.commit()
     db.refresh(n)
-    ensure_embedding(db, n)  # refresh embedding on update
+    ensure_embedding(db, n)  
     db.commit()
     db.refresh(n)
     return n
+
+
+@app.post("/api/embed/rebuild")
+def rebuild_embeddings_endpoint(request: Request):
+    owner = get_owner_id(request)  # X-User header
+    with SessionLocal() as db:
+        rebuild_embeddings(db, owner=owner)
+    return {"status": "ok"}
 
 
 @app.delete("/api/notes/{note_id}")

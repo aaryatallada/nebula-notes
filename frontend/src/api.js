@@ -39,7 +39,7 @@ function userHeaders() {
   return uid ? { "X-User": uid } : {};
 }
 
-async function request(path, { timeout = 15000, headers = {}, ...opts } = {}) {
+async function request(path, { timeout = 30000, headers = {}, ...opts } = {}) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeout);
 

@@ -34,15 +34,49 @@ def get_rerank_model() -> CrossEncoder:
 
 # Serialization helpers
 def to_bytes(vec: np.ndarray) -> bytes:
-    """Serialize float32 vector to bytes for SQLite BLOB (BytesIO-safe)."""
     return vec.astype(np.float32).tobytes()
 
 def from_bytes(b: bytes, dim: int) -> np.ndarray:
-    """Deserialize bytes to float32 numpy vector of expected dim."""
-    arr = np.frombuffer(b, dtype=np.float32, count=dim)
-    if arr.size != dim:
-        raise ValueError(f"Embedding size mismatch: expected {dim}, got {arr.size}")
-    return arr
+    return np.frombuffer(b, dtype=np.float32, count=dim)
+
+def _upsert_embedding(db: Session, note_id: int, vector: np.ndarray):
+    dim = int(vector.shape[-1])
+    existing = db.get(Embedding, note_id)  # SQLAlchemy 2.x way
+    if existing:
+        existing.vector = to_bytes(vector)
+        existing.dim = dim
+        # no add(); it’s already in the session
+    else:
+        db.add(Embedding(note_id=note_id, vector=to_bytes(vector), dim=dim))
+
+def ensure_embedding(db: Session, note: Note):
+    """
+    Compute/update a single note's vector and upsert into DB.
+    Assumes you have embed_texts([...]) available in this module.
+    """
+    text = f"{note.title or ''}\n{note.content or ''}".strip()
+    vec = embed_texts([text])[0]  # your existing embedding function
+    _upsert_embedding(db, note.id, vec)
+
+def rebuild_embeddings(db: Session, owner: Optional[str] = None):
+    """
+    Re-embed all notes for this owner (or all notes if owner is None)
+    and upsert rows to avoid PK collisions.
+    """
+    q = db.query(Note)
+    if owner is not None:
+        q = q.filter(Note.owner_id == owner)
+    notes = q.all()
+    if not notes:
+        return
+
+    texts = [f"{n.title or ''}\n{n.content or ''}".strip() for n in notes]
+    vecs = embed_texts(texts)  # same embed_texts you already use
+
+    for n, v in zip(notes, vecs):
+        _upsert_embedding(db, n.id, v)
+
+    db.commit()
 
 # Embedding utilities
 def embed_texts(texts: List[str]) -> np.ndarray:
@@ -50,20 +84,7 @@ def embed_texts(texts: List[str]) -> np.ndarray:
     model = get_sentence_model()
     return np.array(model.encode(texts, normalize_embeddings=True))
 
-def ensure_embedding(db: Session, note: Note) -> None:
-    """
-    Create or update embedding for a single note.
-    Idempotent: will overwrite existing embedding if present.
-    """
-    text = f"{note.title or ''}\n{note.content or ''}"
-    vec = embed_texts([text])[0]
-    dim = int(vec.shape[0])
-    blob = to_bytes(vec)
-    if note.embedding:
-        note.embedding.vector = blob
-        note.embedding.dim = dim
-    else:
-        db.add(Embedding(note_id=note.id, vector=blob, dim=dim))
+
 
 def missing_embeddings(db: Session) -> List[Note]:
     """Return notes that currently have no stored embedding."""
