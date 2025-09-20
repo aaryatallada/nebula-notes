@@ -1,14 +1,14 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
+import os
+
 
 # Create the db
-DATABASE_URL = "sqlite:///./nebula.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./nebula.db")
 
-# Create engine, since Uvicorn may spawn multiple workers/threads ensure check_same_thread is False
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False}, echo=False)
-# DB session for each request
+connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+engine = create_engine(DATABASE_URL, connect_args=connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
 # Base for model classes
 Base = declarative_base()
 
