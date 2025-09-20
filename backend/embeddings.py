@@ -10,7 +10,7 @@ from sentence_transformers import SentenceTransformer, CrossEncoder
 from rank_bm25 import BM25Okapi
 import re
 
-from models import Note, Embedding
+from models import Note, Embedding, embed_texts
 
 
 # Models onlly have to downloaded once, then cached locally
@@ -45,7 +45,6 @@ def _upsert_embedding(db: Session, note_id: int, vector: np.ndarray):
     if existing:
         existing.vector = to_bytes(vector)
         existing.dim = dim
-        # no add(); it’s already in the session
     else:
         db.add(Embedding(note_id=note_id, vector=to_bytes(vector), dim=dim))
 
@@ -55,7 +54,7 @@ def ensure_embedding(db: Session, note: Note):
     Assumes you have embed_texts([...]) available in this module.
     """
     text = f"{note.title or ''}\n{note.content or ''}".strip()
-    vec = embed_texts([text])[0]  # your existing embedding function
+    vec = embed_texts([text])[0]  
     _upsert_embedding(db, note.id, vec)
 
 def rebuild_embeddings(db: Session, owner: Optional[str] = None):
