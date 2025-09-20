@@ -4,10 +4,6 @@ from sqlalchemy.orm import relationship
 from database import Base  
 
 
-import os
-import threading
-import numpy as np
-from sentence_transformers import SentenceTransformer
 
 
 class Note(Base):

@@ -1,18 +1,14 @@
 # backend/app.py
 
-from typing import List, Optional 
-
-from fastapi import FastAPI, Depends, HTTPException, Query, Header
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
+from starlette.responses import JSONResponse, Response
 
-from database import Base, engine, get_db
+from database import SessionLocal, Base, engine  # <— from database.py
 from models import Note
-from schemas import NoteCreate, NoteUpdate, NoteOut, SearchResult, MapPoint
-from utils import tsne_2d
+from embeddings import ensure_embedding, rebuild_embeddings
 
 
-from .embeddings import ensure_embedding, rebuild_embeddings, similarity_search
 try:
     from embeddings import hybrid_search, rerank 
     _HAS_HYBRID = True
